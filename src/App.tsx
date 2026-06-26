@@ -10,7 +10,15 @@ import { WorkloadTemplate } from "./data/templates";
 import { Bot, Sparkles, RefreshCw, Calendar, Clock, CheckSquare, ShieldAlert, BookOpen, AlertCircle } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
-const TODAY_DATE = "2026-06-25"; // In sync with additional metadata
+const getLocalDateString = () => {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const TODAY_DATE = getLocalDateString(); // Dynamic real local date
 
 export default function App() {
   // State
@@ -546,7 +554,7 @@ export default function App() {
       
       {/* Footer */}
       <footer className="border-t border-slate-100 bg-white/40 py-6 text-center text-xs text-slate-400 font-medium">
-        DeadlineZero App • Powered by Gemini AI Studio • Operational Workspace Time: 2026-06-25
+        DeadlineZero App • Powered by Gemini AI Studio • Operational Workspace Time: {TODAY_DATE}
       </footer>
 
     </div>
