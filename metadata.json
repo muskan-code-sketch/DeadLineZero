@@ -1,0 +1,6 @@
+{
+  "name": "DeadlineZero",
+  "description": "An AI-powered productivity companion that helps you plan, prioritize, and schedule your tasks before deadlines are missed.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
