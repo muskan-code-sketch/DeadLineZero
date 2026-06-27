@@ -287,4 +287,6 @@ if __name__ == '__main__':
     # Determine port: 3000 is default for container environments
     port = int(os.environ.get("PORT", 3000))
     logger.info(f"Starting DeadlineZero Flask server on port {port}...")
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # Disabling the auto-reloader (use_reloader=False) prevents the signal registration
+    # crash when Flask is executed in multi-threaded environments (e.g. Streamlit or sub-interpreters).
+    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
