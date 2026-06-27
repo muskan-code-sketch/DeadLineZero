@@ -282,11 +282,204 @@ Structure your response strictly to conform to the JSON schema below."""
         return jsonify({"error": f"Failed to process chat session: {str(e)}"}), 500
 
 
-# Run Flask development server
-if __name__ == '__main__':
-    # Determine port: 3000 is default for container environments
+# =====================================================================
+# Execution Entry Points & Hybrid Streamlit Integration
+# =====================================================================
+
+def start_flask_server(port):
+    """
+    Attempts to start the Flask server.
+    If the port is already in use, it handles it gracefully to prevent crashes.
+    """
+    try:
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except OSError as e:
+        if "Address already in use" in str(e) or getattr(e, 'errno', None) in (98, 10048):
+            logger.warning(f"Port {port} is already in use. Flask server is likely already running.")
+        else:
+            raise e
+
+def run_flask_in_background_thread(port):
+    """
+    Starts Flask server inside a background daemon thread.
+    Avoids blocking Streamlit or other main-interpreter threads.
+    """
+    import threading
+    import socket
+
+    # Quick port-binding test to check if already occupied
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(('0.0.0.0', port))
+        s.close()
+        port_available = True
+    except OSError:
+        port_available = False
+
+    if not port_available:
+        logger.info(f"Port {port} is already in use. Assuming Flask server is running in another process.")
+        return False
+
+    def target():
+        try:
+            logger.info(f"Starting Flask server on port {port} in background daemon thread...")
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
+        except Exception as err:
+            logger.error(f"Flask background thread crashed: {err}")
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    return True
+
+# Check if running under Streamlit
+is_streamlit = False
+try:
+    import streamlit as st
+    from streamlit.runtime import exists as streamlit_runtime_exists
+    if streamlit_runtime_exists():
+        is_streamlit = True
+except ImportError:
+    pass
+
+if is_streamlit:
+    # -------------------------------------------------------------
+    # Streamlit Page Render
+    # -------------------------------------------------------------
+    st.set_page_config(page_title="DeadlineZero Companion", page_icon="🎯", layout="wide")
+    
+    # 1. Initialize Flask server in a background daemon thread so it doesn't block Streamlit
     port = int(os.environ.get("PORT", 3000))
-    logger.info(f"Starting DeadlineZero Flask server on port {port}...")
-    # Disabling the auto-reloader (use_reloader=False) prevents the signal registration
-    # crash when Flask is executed in multi-threaded environments (e.g. Streamlit or sub-interpreters).
-    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
+    flask_started = run_flask_in_background_thread(port)
+    
+    st.markdown("""
+    <div style="background-color:#1E1E1E;padding:20px;border-radius:10px;margin-bottom:20px;">
+        <h1 style="color:#FFFFFF;margin:0;font-family:sans-serif;">🎯 DeadlineZero API Companion</h1>
+        <p style="color:#AAAAAA;margin:5px 0 0 0;">Production-ready Flask Backend Service running seamlessly alongside Streamlit</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Check if API Key is configured
+    api_key_configured = bool(os.environ.get("GEMINI_API_KEY"))
+    
+    # Columns layout
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("⚙️ System Status")
+        
+        # Connection status badge
+        st.markdown(f"""
+        <div style="background-color:#2D2D2D;padding:15px;border-radius:8px;border-left:5px solid #4CAF50;margin-bottom:15px;">
+            <p style="margin:0;font-weight:bold;color:#4CAF50;">🟢 API Server active</p>
+            <p style="margin:5px 0 0 0;font-size:12px;color:#DDDDDD;">Serving requests on: <b>http://localhost:{port}</b></p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Gemini API Key Status
+        if api_key_configured:
+            st.success("✅ GEMINI_API_KEY is configured and verified.")
+        else:
+            st.error("❌ GEMINI_API_KEY is missing!")
+            st.warning("Please define the GEMINI_API_KEY environment variable to enable intelligent chat and workload analyzing capabilities.")
+
+        st.markdown("### Supported API Paths:")
+        st.info("""
+        - **`POST /api/analyze`**: Prioritize tasks into Eisenhower Matrix, plan schedules, and generate tight deadline warnings.
+        - **`POST /api/chat`**: Natural language conversational agent with task adjustment triggers.
+        """)
+        
+        st.markdown("### Troubleshooting Guides")
+        st.markdown("""
+        If you see **Address already in use**, that is normal! It means the background Flask server is already running and listening for incoming connection requests successfully.
+        """)
+
+    with col2:
+        st.subheader("💬 Interactive Companion Playground")
+        st.markdown("Test your natural language conversations with DeadlineZero:")
+
+        # Initialize session state for messages if not present
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = [
+                {"role": "model", "text": "Hello! I am DeadlineZero. I'm here to analyze your workload and help you beat any tight deadlines. Ask me anything, or type a request to modify your deadlines!"}
+            ]
+
+        # Display conversation
+        for msg in st.session_state.chat_history:
+            with st.chat_message("user" if msg["role"] == "user" else "assistant"):
+                st.markdown(msg["text"])
+
+        # Input field
+        user_input = st.chat_input("Ask DeadlineZero or update a task...")
+        if user_input:
+            # Append and display user message
+            st.session_state.chat_history.append({"role": "user", "text": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            # Get model response
+            if not api_key_configured:
+                response_text = "⚠️ Unable to contact Gemini API because the `GEMINI_API_KEY` is not defined in your environment variables. Please check your configuration."
+                st.session_state.chat_history.append({"role": "model", "text": response_text})
+                with st.chat_message("assistant"):
+                    st.warning(response_text)
+            else:
+                with st.spinner("DeadlineZero is analyzing..."):
+                    try:
+                        # Call internal chat logic directly for immediate response without network overhead
+                        ai_client = get_genai_client()
+                        
+                        # Prepare the input for the client using our exist /api/chat system instruction
+                        system_inst = "You are 'DeadlineZero', a friendly, direct, motivating AI companion."
+                        
+                        contents = []
+                        # Map current chat history to types.Content
+                        for m in st.session_state.chat_history:
+                            role = "user" if m["role"] == "user" else "model"
+                            contents.append(
+                                types.Content(
+                                    role=role,
+                                    parts=[types.Part.from_text(text=m["text"])]
+                                )
+                            )
+                        
+                        # Generate response
+                        response = ai_client.models.generate_content(
+                            model="gemini-3.5-flash",
+                            contents=contents,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_inst,
+                                response_mime_type="application/json",
+                                response_schema=ChatResponse,
+                            )
+                        )
+                        
+                        import json
+                        response_data = json.loads(response.text)
+                        response_text = response_data.get("text", "No text response received.")
+                        
+                        # Display adjustments if any
+                        adjustments = response_data.get("suggestedAdjustments")
+                        if adjustments:
+                            response_text += "\n\n**Suggested workspace adjustments detected:**"
+                            for adj in adjustments:
+                                response_text += f"\n- **Type**: `{adj.get('type')}`"
+                                if adj.get('reason'):
+                                    response_text += f" | *Reason*: {adj.get('reason')}"
+                        
+                    except Exception as err:
+                        response_text = f"❌ Error contacting Gemini AI: {err}"
+                        logger.error(response_text)
+                    
+                    st.session_state.chat_history.append({"role": "model", "text": response_text})
+                    with st.chat_message("assistant"):
+                        st.markdown(response_text)
+
+else:
+    # -------------------------------------------------------------
+    # Standalone Command-Line Run (Not in Streamlit)
+    # -------------------------------------------------------------
+    if __name__ == '__main__':
+        port = int(os.environ.get("PORT", 3000))
+        logger.info(f"Starting DeadlineZero Flask server on port {port}...")
+        start_flask_server(port)
+
