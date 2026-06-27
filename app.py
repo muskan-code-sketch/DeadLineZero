@@ -97,6 +97,367 @@ class ChatResponse(BaseModel):
 
 
 # =====================================================================
+# Local Smart Heuristic Fallback Engines (Keyless Execution Support)
+# =====================================================================
+
+def run_local_heuristic_analysis(tasks: list, current_time_str: str) -> dict:
+    """
+    Computes a smart, deterministic, local heuristic fallback for /api/analyze.
+    Ensures that the dashboard is fully populated and functional without an API key.
+    """
+    import datetime
+    
+    # 1. Parse current date
+    today = datetime.date.today()
+    if current_time_str:
+        try:
+            date_part = current_time_str.split("T")[0]
+            today = datetime.datetime.strptime(date_part, "%Y-%m-%d").date()
+        except Exception:
+            pass
+
+    critical_ids = []
+    important_ids = []
+    low_priority_ids = []
+    warnings = []
+    
+    # Organize tasks
+    pending_tasks = []
+    for t in tasks:
+        if not isinstance(t, dict) or "id" not in t:
+            continue
+        task_id = str(t.get("id"))
+        title = t.get("title", "Untitled Task")
+        importance = str(t.get("importance", "medium")).lower()
+        status = str(t.get("status", "pending")).lower()
+        deadline_str = t.get("deadline", "")
+        duration = float(t.get("duration") or 0.0)
+        
+        # Parse deadline
+        task_date = None
+        if deadline_str:
+            try:
+                task_date = datetime.datetime.strptime(deadline_str, "%Y-%m-%d").date()
+            except Exception:
+                pass
+        
+        # Categorize into quadrants
+        if importance == "high":
+            if task_date and (task_date - today).days <= 3:
+                critical_ids.append(task_id)
+            else:
+                important_ids.append(task_id)
+        elif importance == "medium":
+            if task_date and (task_date - today).days <= 2:
+                critical_ids.append(task_id)
+            elif task_date and (task_date - today).days <= 7:
+                important_ids.append(task_id)
+            else:
+                low_priority_ids.append(task_id)
+        else: # low importance
+            if task_date and (task_date - today).days <= 1:
+                critical_ids.append(task_id)
+            else:
+                low_priority_ids.append(task_id)
+                
+        # For scheduling, keep pending tasks
+        if status != "completed":
+            pending_tasks.append({
+                "id": task_id,
+                "title": title,
+                "date": task_date,
+                "duration": duration,
+                "importance": importance
+            })
+
+    # Sort pending tasks by urgency (earliest deadline first)
+    pending_tasks.sort(key=lambda x: x["date"] if x["date"] else datetime.date.max)
+
+    # 2. Daily schedule generation (next 10 days)
+    schedule_days = []
+    for i in range(10):
+        day_date = today + datetime.timedelta(days=i)
+        schedule_days.append({
+            "date": day_date.strftime("%Y-%m-%d"),
+            "date_obj": day_date,
+            "tasks": [],
+            "allocated_hours": 0.0
+        })
+
+    for task in pending_tasks:
+        task_id = task["id"]
+        title = task["title"]
+        task_date = task["date"]
+        duration = task["duration"]
+        
+        if not task_date:
+            target_days = [schedule_days[0]]
+        else:
+            # Days available from today up to deadline day
+            target_days = [d for d in schedule_days if d["date_obj"] <= task_date]
+            if not target_days:
+                # Overdue! Put on day 1 and trigger warning
+                warnings.append({
+                    "taskId": task_id,
+                    "taskTitle": title,
+                    "message": f"Overdue! Deadline was on {task_date.strftime('%Y-%m-%d')}, but the task remains pending.",
+                    "severity": "danger"
+                })
+                target_days = [schedule_days[0]]
+
+        # Distribute hours among target days
+        hours_to_allocate = duration
+        for day in target_days:
+            if hours_to_allocate <= 0:
+                break
+            day_space = max(0.0, 6.0 - day["allocated_hours"])
+            if day_space > 0:
+                alloc = min(hours_to_allocate, day_space, 4.0)
+                if alloc > 0:
+                    day["tasks"].append({
+                        "taskId": task_id,
+                        "taskTitle": title,
+                        "allocatedHours": round(alloc, 1),
+                        "notes": f"Dedicate a solid block of {round(alloc, 1)}h to complete this phase."
+                    })
+                    day["allocated_hours"] += alloc
+                    hours_to_allocate -= alloc
+
+        # Force push leftover hours
+        if hours_to_allocate > 0:
+            for day in target_days:
+                if hours_to_allocate <= 0:
+                    break
+                alloc = hours_to_allocate
+                day["tasks"].append({
+                    "taskId": task_id,
+                    "taskTitle": title,
+                    "allocatedHours": round(alloc, 1),
+                    "notes": "Intense push! Stay focused to cover this remaining time block."
+                })
+                day["allocated_hours"] += alloc
+                hours_to_allocate = 0
+
+    # Format schedule to match response model
+    final_schedule = []
+    for day in schedule_days:
+        if day["tasks"]:
+            final_schedule.append({
+                "date": day["date"],
+                "tasks": day["tasks"]
+            })
+
+    # 3. Generate warning triggers
+    for t in pending_tasks:
+        task_id = t["id"]
+        title = t["title"]
+        task_date = t["date"]
+        duration = t["duration"]
+        if task_date:
+            days_left = (task_date - today).days
+            if days_left < 0:
+                continue
+            elif days_left == 0:
+                warnings.append({
+                    "taskId": task_id,
+                    "taskTitle": title,
+                    "message": "Due today! Pause secondary activities and finish this task immediately.",
+                    "severity": "danger"
+                })
+            elif days_left > 0 and duration > (days_left * 8):
+                warnings.append({
+                    "taskId": task_id,
+                    "taskTitle": title,
+                    "message": f"Requires {duration} hours but you only have {days_left} days left. Extremely tight timeline!",
+                    "severity": "danger"
+                })
+            elif days_left <= 2:
+                warnings.append({
+                    "taskId": task_id,
+                    "taskTitle": title,
+                    "message": f"Deadline is approaching rapidly in {days_left} days.",
+                    "severity": "warning"
+                })
+
+    # Daily schedule overloading warning
+    for day in schedule_days:
+        if day["allocated_hours"] > 6.0:
+            warnings.append({
+                "taskId": "schedule_overload",
+                "taskTitle": f"Schedule on {day['date']}",
+                "message": f"Total workload planned for {day['date']} is {round(day['allocated_hours'], 1)} hours. This is heavily congested!",
+                "severity": "warning"
+            })
+
+    tips = [
+        "Prune your low-priority tasks: If it's in the Low Priority quadrant, delay or delete it to regain focus.",
+        "Eat the frog: Work on your Critical tasks first thing in the morning when your energy levels are highest.",
+        "The 25-minute block: Use a Pomodoro timer (25 mins work, 5 mins break) to maintain high mental stamina."
+    ]
+
+    summary_msg = "Hello! I am your companion DeadlineZero. "
+    if not tasks:
+        summary_msg += "Your task list is empty! Add tasks with deadlines to construct your high-performance Eisenhower plan."
+    else:
+        completed_count = sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "completed")
+        pending_count = len(tasks) - completed_count
+        summary_msg += f"I have analyzed your {len(tasks)} tasks. You have successfully completed {completed_count} tasks and have {pending_count} pending items. "
+        if len(critical_ids) > 0:
+            summary_msg += f"Focus closely on the {len(critical_ids)} items in your Critical quadrant to avoid tight bottlenecks."
+        else:
+            summary_msg += "Your Critical quadrant is entirely clean! This is the perfect time to schedule ahead on Important items."
+
+    return {
+        "criticalIds": critical_ids,
+        "importantIds": important_ids,
+        "lowPriorityIds": low_priority_ids,
+        "schedule": final_schedule,
+        "tips": tips,
+        "warnings": warnings,
+        "summary": summary_msg
+    }
+
+def run_local_heuristic_chat(messages: list, tasks: list) -> dict:
+    """
+    Computes a smart, responsive local fallback chat interaction for /api/chat.
+    Returns structured workspace adjustments for interactive natural language commands.
+    """
+    import datetime
+    
+    user_msg = ""
+    for msg in reversed(messages):
+        role_or_sender = msg.get("sender") or msg.get("role", "")
+        if role_or_sender == "user":
+            user_msg = msg.get("text", "").lower()
+            break
+
+    suggested_adjustments = []
+    text_reply = ""
+
+    # Parse commands
+    if "add" in user_msg or "create" in user_msg or "new task" in user_msg:
+        title = "New Task"
+        if "add task" in user_msg:
+            parts = user_msg.split("add task")
+            if len(parts) > 1 and parts[1].strip():
+                title = parts[1].strip()
+        elif "add" in user_msg:
+            parts = user_msg.split("add")
+            if len(parts) > 1 and parts[1].strip():
+                title = parts[1].strip()
+                
+        title = title.replace(" tomorrow", "").replace(" today", "").strip().title()
+        
+        suggested_adjustments.append({
+            "type": "create_task",
+            "taskData": {
+                "title": title,
+                "importance": "medium",
+                "duration": 2.0,
+                "status": "pending"
+            },
+            "reason": f"Created new task '{title}' as requested."
+        })
+        text_reply = f"I've set up a suggestion to create the task **\"{title}\"** with standard settings. You can review and confirm it directly in the main dashboard!"
+
+    elif "complete" in user_msg or "done" in user_msg or "finish" in user_msg:
+        matched_task = None
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            t_title = str(t.get("title", "")).lower()
+            t_id = str(t.get("id", ""))
+            if t_title in user_msg or t_id in user_msg:
+                matched_task = t
+                break
+                
+        if matched_task:
+            suggested_adjustments.append({
+                "type": "update_task",
+                "taskId": matched_task["id"],
+                "taskData": {
+                    "status": "completed"
+                },
+                "reason": f"Marked task '{matched_task.get('title')}' as completed!"
+            })
+            text_reply = f"Excellent work! I've marked your task **\"{matched_task.get('title')}\"** as completed. It's satisfying to cross things off your list!"
+        else:
+            if tasks:
+                first_pending = next((t for t in tasks if t.get("status") != "completed"), tasks[0])
+                suggested_adjustments.append({
+                    "type": "update_task",
+                    "taskId": first_pending["id"],
+                    "taskData": {
+                        "status": "completed"
+                    },
+                    "reason": f"Marked active task '{first_pending.get('title')}' as completed!"
+                })
+                text_reply = f"I assumed you meant your active task **\"{first_pending.get('title')}\"**, so I've suggested marking it as completed. Great job!"
+            else:
+                text_reply = "Which task would you like me to mark as done? I don't see any matching tasks in your current list!"
+
+    elif "delete" in user_msg or "remove" in user_msg:
+        matched_task = None
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            t_title = str(t.get("title", "")).lower()
+            t_id = str(t.get("id", ""))
+            if t_title in user_msg or t_id in user_msg:
+                matched_task = t
+                break
+                
+        if matched_task:
+            suggested_adjustments.append({
+                "type": "delete_task",
+                "taskId": matched_task["id"],
+                "reason": f"Deleted the task '{matched_task.get('title')}'."
+            })
+            text_reply = f"Understood. I've suggested removing the task **\"{matched_task.get('title')}\"** from your active workspace."
+        else:
+            text_reply = "Which task would you like me to delete? Please specify the name or ID from your task list."
+
+    elif "delay" in user_msg or "push" in user_msg or "postpone" in user_msg or "extend" in user_msg:
+        matched_task = None
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            t_title = str(t.get("title", "")).lower()
+            if t_title in user_msg:
+                matched_task = t
+                break
+        
+        if matched_task:
+            new_date = (datetime.date.today() + datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+            suggested_adjustments.append({
+                "type": "update_task",
+                "taskId": matched_task["id"],
+                "taskData": {
+                    "deadline": new_date
+                },
+                "reason": "Postponed task deadline as requested."
+            })
+            text_reply = f"No problem, things happen! I've suggested extending the deadline for **\"{matched_task.get('title')}\"** by 3 days (to {new_date}) to give you some extra breathing room."
+        else:
+            text_reply = "Which task would you like to push back? Specify the task title so I can reschedule it."
+
+    else:
+        text_reply = (
+            "Hey! I'm **DeadlineZero**, your productivity companion. \n\n"
+            "I can help you prioritize your tasks, warn you about tight deadlines, and even automate your list adjustments. Try saying:\n"
+            "- *\"Add task Design mockups\"*\n"
+            "- *\"Mark task Complete math homework\"*\n"
+            "- *\"Delete study session\"*\n\n"
+            "Tell me what you're working on, and let's keep your workflow optimized!"
+        )
+
+    return {
+        "text": text_reply,
+        "suggestedAdjustments": suggested_adjustments
+    }
+
+
+# =====================================================================
 # API Endpoints
 # =====================================================================
 
@@ -125,27 +486,34 @@ def analyze_workload():
         
         current_time = data.get("currentTime", "")
         
-        # Set up Gemini AI Client
-        ai_client = get_genai_client()
+        # Checking API Key presence upfront for immediate fallback
+        if not os.environ.get("GEMINI_API_KEY"):
+            logger.info("GEMINI_API_KEY is not defined. Using local smart heuristics.")
+            result = run_local_heuristic_analysis(tasks, current_time)
+            return jsonify(result)
         
-        # Compile task representation for LLM ingestion
-        tasks_representation = []
-        for t in tasks:
-            if not isinstance(t, dict) or "id" not in t or "title" not in t:
-                continue
-            tasks_representation.append(
-                f"- Task ID: {t.get('id')}\n"
-                f"  Title: \"{t.get('title')}\"\n"
-                f"  Deadline: {t.get('deadline', 'N/A')}\n"
-                f"  Estimated Duration: {t.get('duration', 0)} hours\n"
-                f"  Importance: {t.get('importance', 'medium')}\n"
-                f"  Consequence of failure: \"{t.get('impact', 'None specified')}\"\n"
-                f"  Status: {t.get('status', 'pending')}"
-            )
-        tasks_string = "\n\n".join(tasks_representation)
+        try:
+            # Set up Gemini AI Client
+            ai_client = get_genai_client()
+            
+            # Compile task representation for LLM ingestion
+            tasks_representation = []
+            for t in tasks:
+                if not isinstance(t, dict) or "id" not in t or "title" not in t:
+                    continue
+                tasks_representation.append(
+                    f"- Task ID: {t.get('id')}\n"
+                    f"  Title: \"{t.get('title')}\"\n"
+                    f"  Deadline: {t.get('deadline', 'N/A')}\n"
+                    f"  Estimated Duration: {t.get('duration', 0)} hours\n"
+                    f"  Importance: {t.get('importance', 'medium')}\n"
+                    f"  Consequence of failure: \"{t.get('impact', 'None specified')}\"\n"
+                    f"  Status: {t.get('status', 'pending')}"
+                )
+            tasks_string = "\n\n".join(tasks_representation)
 
-        # Build prompt & system instruction
-        system_instruction = f"""You are "DeadlineZero", a high-performance, direct, motivating, and friendly productivity companion.
+            # Build prompt & system instruction
+            system_instruction = f"""You are "DeadlineZero", a high-performance, direct, motivating, and friendly productivity companion.
 Your job is to analyze the user's workload, prioritize tasks using the Eisenhower Matrix, generate a realistic day-by-day plan, warn about tight windows, and provide tailored actionable tips.
 
 Current Local Time: {current_time or "not specified"}
@@ -164,29 +532,32 @@ Generate warnings for any tasks where:
 
 Format your output EXACTLY as specified in the response schema."""
 
-        prompt = f"""Here is my current list of tasks:
+            prompt = f"""Here is my current list of tasks:
 
 {tasks_string or "No tasks available. Please ask clarifying questions or suggest creating a task."}
 
 Please perform your comprehensive DeadlineZero analysis. Ensure you categorize every single task ID into either 'criticalIds', 'importantIds', or 'lowPriorityIds'. Map out a realistic daily schedule, flag at-risk tasks, and give me direct, high-value, motivating tips."""
 
-        # Query Gemini API with Pydantic structured output
-        logger.info("Calling Gemini API model for /api/analyze...")
-        response = ai_client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=AnalysisResponse,
+            # Query Gemini API with Pydantic structured output
+            logger.info("Calling Gemini API model for /api/analyze...")
+            response = ai_client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    response_schema=AnalysisResponse,
+                )
             )
-        )
-        
-        # Return parsed JSON structure
-        return response.text, 200, {'Content-Type': 'application/json'}
+            
+            # Return parsed JSON structure
+            return response.text, 200, {'Content-Type': 'application/json'}
 
-    except ValueError as val_err:
-        return jsonify({"error": str(val_err)}), 500
+        except Exception as gemini_err:
+            logger.warning(f"Gemini API analyze failed: {gemini_err}. Falling back to smart local heuristics.")
+            result = run_local_heuristic_analysis(tasks, current_time)
+            return jsonify(result)
+
     except Exception as e:
         logger.exception("Error in /api/analyze endpoint:")
         return jsonify({"error": f"Failed to analyze workload: {str(e)}"}), 500
@@ -211,24 +582,31 @@ def chat_companion():
         tasks = data.get("tasks", [])
         current_time = data.get("currentTime", "")
         
-        # Set up Gemini AI Client
-        ai_client = get_genai_client()
-        
-        # Compile user tasks representation
-        tasks_representation = []
-        if isinstance(tasks, list):
-            for t in tasks:
-                if not isinstance(t, dict):
-                    continue
-                tasks_representation.append(
-                    f"- ID: {t.get('id')}, Title: \"{t.get('title')}\", "
-                    f"Deadline: {t.get('deadline')}, Estimated Duration: {t.get('duration')}h, "
-                    f"Importance: {t.get('importance')}, Consequence: \"{t.get('impact', 'None specified')}\", "
-                    f"Status: {t.get('status')}"
-                )
-        tasks_string = "\n".join(tasks_representation) if tasks_representation else "No tasks currently in list."
+        # Checking API Key presence upfront for immediate fallback
+        if not os.environ.get("GEMINI_API_KEY"):
+            logger.info("GEMINI_API_KEY is not defined. Using local smart chat companion heuristics.")
+            result = run_local_heuristic_chat(messages, tasks)
+            return jsonify(result)
 
-        system_instruction = f"""You are "DeadlineZero", a friendly, direct, motivating AI companion. Your purpose is to keep the user from missing deadlines and keep their workspace stress-free.
+        try:
+            # Set up Gemini AI Client
+            ai_client = get_genai_client()
+            
+            # Compile user tasks representation
+            tasks_representation = []
+            if isinstance(tasks, list):
+                for t in tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    tasks_representation.append(
+                        f"- ID: {t.get('id')}, Title: \"{t.get('title')}\", "
+                        f"Deadline: {t.get('deadline')}, Estimated Duration: {t.get('duration')}h, "
+                        f"Importance: {t.get('importance')}, Consequence: \"{t.get('impact', 'None specified')}\", "
+                        f"Status: {t.get('status')}"
+                    )
+            tasks_string = "\n".join(tasks_representation) if tasks_representation else "No tasks currently in list."
+
+            system_instruction = f"""You are "DeadlineZero", a friendly, direct, motivating AI companion. Your purpose is to keep the user from missing deadlines and keep their workspace stress-free.
 
 Current Local Time: {current_time or "not specified"}
 
@@ -248,35 +626,38 @@ Adjustment types:
 
 Structure your response strictly to conform to the JSON schema below."""
 
-        # Reconstruct chat contents for conversational continuity
-        contents = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            role = "user" if msg.get("sender") == "user" else "model"
-            contents.append(
-                types.Content(
-                    role=role,
-                    parts=[types.Part.from_text(text=msg.get("text", ""))]
+            # Reconstruct chat contents for conversational continuity
+            contents = []
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                role = "user" if msg.get("sender") == "user" else "model"
+                contents.append(
+                    types.Content(
+                        role=role,
+                        parts=[types.Part.from_text(text=msg.get("text", ""))]
+                    )
+                )
+
+            # Query Gemini API with Pydantic structured output
+            logger.info("Calling Gemini API model for /api/chat...")
+            response = ai_client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    response_schema=ChatResponse,
                 )
             )
+            
+            return response.text, 200, {'Content-Type': 'application/json'}
 
-        # Query Gemini API with Pydantic structured output
-        logger.info("Calling Gemini API model for /api/chat...")
-        response = ai_client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=ChatResponse,
-            )
-        )
-        
-        return response.text, 200, {'Content-Type': 'application/json'}
+        except Exception as gemini_err:
+            logger.warning(f"Gemini API chat failed: {gemini_err}. Falling back to smart local heuristics.")
+            result = run_local_heuristic_chat(messages, tasks)
+            return jsonify(result)
 
-    except ValueError as val_err:
-        return jsonify({"error": str(val_err)}), 500
     except Exception as e:
         logger.exception("Error in /api/chat endpoint:")
         return jsonify({"error": f"Failed to process chat session: {str(e)}"}), 500
