@@ -1,0 +1,8 @@
+# Dependencies for deploy.py
+# Since scripts/deploy.py uses only the Python Standard Library (os, sys, subprocess, zipfile, etc.),
+# no external third-party libraries are required.
+#
+# If you wish to extend the deployment script with additional features (e.g., automatic Google Cloud API uploading),
+# you can install these standard packages:
+#
+# requests>=2.31.0
