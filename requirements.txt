@@ -1,7 +1,0 @@
-# Requirements file for DeadlineZero Python script deployment utility.
-# Since scripts/deploy.py uses only the Python Standard Library (os, sys, subprocess, zipfile, etc.),
-# no third-party packages are strictly required.
-# 
-# If you wish to extend the deployment script with additional capabilities, 
-# you can install standard automation libraries:
-# requests>=2.31.0
